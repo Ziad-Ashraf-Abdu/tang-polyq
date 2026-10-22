@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: tang_polyq
+Version: 0.1.0
+Summary: Deterministic and Stochastic Intracellular Huntington's Disease Modeling (Tang et al., 2010 / BIOMD0000000285)
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.22
+Requires-Dist: scipy>=1.9
+Requires-Dist: matplotlib>=3.6

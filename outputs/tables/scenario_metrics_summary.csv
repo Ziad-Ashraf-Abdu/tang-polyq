@@ -1,0 +1,11 @@
+Scenario,Inclusion_Seed_Time_h,Proteasome_Exhaustion_Time_h,PolyQ_Oligomers_30h,MisP_Oligomers_30h,Death_at_30h_pct,Death_at_48h_pct
+untreated,6.70,19.77,126.2,2148.0,14.23,34.76
+p38_inhibitor,7.75,25.72,92.5,495.3,1.52,2.16
+pi_24h,6.70,19.77,126.2,2148.0,14.23,34.76
+pi_24h_p38_inhibitor,7.75,24.40,92.5,495.8,1.52,2.16
+no_p38_ros_feedback,7.80,25.98,90.3,450.0,4.27,15.45
+pi_24h_no_feedback,7.80,24.48,90.3,450.7,4.27,15.46
+p38_inh_no_feedback,7.80,25.98,90.3,450.0,1.50,2.11
+no_basal_ros_gen,8.12,24.45,87.7,1182.3,5.97,26.00
+no_polyq_control,28.23,39.62,0.0,956.1,14.78,31.17
+no_polyq_no_agg,N/A,N/A,0.0,0.0,7.43,12.33

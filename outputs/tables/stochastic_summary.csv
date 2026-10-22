@@ -1,0 +1,7 @@
+Run_Label,Scenario,N_Cells,Tau_s,Median_Nucleation_h,Inclusions_24h_pct,Inclusions_30h_pct,Inclusions_36h_pct,Inclusions_42h_pct,Inclusions_48h_pct,Death_30h_pct,Death_30h_SE,Death_48h_pct,Death_48h_SE
+untreated,untreated,300,2.0,32.78,19.0,25.7,42.0,56.0,65.3,26.00,2.53,47.67,2.88
+pi_24h,pi_24h,300,2.0,32.06,14.3,28.7,58.7,74.0,74.0,22.00,2.39,43.00,2.86
+p38_inhibitor,p38_inhibitor,300,2.0,41.51,1.7,4.3,7.7,15.3,28.7,6.33,1.41,22.67,2.42
+untreated_tau_1s,untreated,300,1.0,33.40,18.3,28.3,40.0,57.3,69.0,18.00,2.22,41.00,2.84
+untreated_tau_2s,untreated,300,2.0,32.78,19.0,25.7,42.0,56.0,65.3,26.00,2.53,47.67,2.88
+untreated_tau_5s,untreated,300,5.0,32.32,13.3,25.3,41.0,60.0,68.0,21.67,2.38,46.67,2.88

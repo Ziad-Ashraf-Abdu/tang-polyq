@@ -1,0 +1,6 @@
+pyproject.toml
+src/tang_polyq.egg-info/PKG-INFO
+src/tang_polyq.egg-info/SOURCES.txt
+src/tang_polyq.egg-info/dependency_links.txt
+src/tang_polyq.egg-info/requires.txt
+src/tang_polyq.egg-info/top_level.txt

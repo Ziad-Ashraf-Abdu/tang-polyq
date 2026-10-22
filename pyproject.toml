@@ -1,0 +1,18 @@
+# File: tang-polyq/pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tang_polyq"
+version = "0.2.0"
+description = "Deterministic and Stochastic Intracellular Huntington's Disease Modeling (Tang et al., 2010 / BIOMD0000000285)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.9",
+    "matplotlib>=3.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
