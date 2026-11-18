@@ -33,6 +33,8 @@ globals [
   curr-dt-max
   t-seed-h
   t-exhaust-h
+  final-saved?
+  last-save-msg
 ]
 
 to setup
@@ -43,6 +45,8 @@ to setup
   set status-msg "Initializing Python Engine..."
   set t-seed-h -1
   set t-exhaust-h -1
+  set final-saved? false
+  set last-save-msg "(nothing saved yet)"
 
   py:setup py:python
   py:run "import sys, os, numpy as np"
@@ -50,11 +54,14 @@ to setup
   py:run "from tang_polyq.model import load_default_model"
   py:run "from tang_polyq.scenarios import get_scenarios"
   py:run "from tang_polyq.stability import compute_jacobian"
+  py:run "from tang_polyq.netlogo_export import RunRecorder, effective_params, save_run"
 
   py:set "use_ma_dimer" mass-action-dimer?
   py:set "scen_key" scenario-mode
   py:set "dt_val" step-size-dt
   py:set "n_cells_val" n-ensemble-cells
+  py:set "steps_val" steps-per-tick
+  py:set "seed_val" rng-seed
   py:set "solver_mode" solver-type
   py:set "custom_override" use-custom-sliders?
   py:set "slider_kp38act" kp38act-slider
@@ -68,11 +75,32 @@ to setup
     "scens = get_scenarios()"
     "scen = scens[scen_key]"
     "y_ode = scen.get_initial_state(model).copy()"
-    "rng = np.random.default_rng(42)"
+    "rng = np.random.default_rng(int(seed_val))"
     "Y_mc = np.repeat(y_ode[:, None], int(n_cells_val), axis=1).astype(np.float64)"
     "alive_mask = np.ones(int(n_cells_val), dtype=bool)"
     "sp_map = model.species_map"
     "t_curr = 0.0"
+    "p_start = scen.get_params_at(model, 0.0)"
+    "p_after = scen.get_params_at(model, 1.0e12)"
+  )
+
+  ;; Unless custom values are switched on, show the scenario's own parameter values in the sliders,
+  ;; so that turning "use-custom-sliders?" on later changes nothing until a slider is moved.
+  if not use-custom-sliders? [
+    set kp38act-slider py:runresult "float(p_start['kp38act'])"
+    set kproteff-24h-slider py:runresult "float(p_after['kproteff'])"
+    set kgenROSp38-slider py:runresult "float(p_start['kgenROSp38'])"
+    set kaggMisP-slider py:runresult "float(p_start['kaggMisP'])"
+  ]
+  py:set "slider_kp38act" kp38act-slider
+  py:set "slider_kproteff" kproteff-24h-slider
+  py:set "slider_kgenROSp38" kgenROSp38-slider
+  py:set "slider_kaggMisP" kaggMisP-slider
+
+  ;; data recorder for this run (saved by save-run-data)
+  (py:run
+    "sl = dict(kp38act=float(slider_kp38act), kproteff_after_24h=float(slider_kproteff), kgenROSp38=float(slider_kgenROSp38), kaggMisP=float(slider_kaggMisP))"
+    "rec = RunRecorder(scenario=scen_key, solver=solver_mode, dt_s=float(dt_val), steps_per_tick=int(steps_val), n_cells=int(n_cells_val), seed=int(seed_val), mass_action_dimer=bool(use_ma_dimer), custom_sliders=bool(custom_override), params=effective_params(p_start, p_after, bool(custom_override), sl))"
   )
 
   setup-visual-world
@@ -122,7 +150,10 @@ to setup-visual-world
 end
 
 to go
-  if sim-time-h >= 48.0 or is-unstable? [ stop ]
+  if sim-time-h >= 48.0 or is-unstable? [
+    if not final-saved? [ auto-save-run ]
+    stop
+  ]
 
   py:set "dt_val" step-size-dt
   py:set "solver_mode" solver-type
@@ -180,12 +211,14 @@ to go
   if is-unstable? [
     set status-msg (word "UNSTABLE BLOWUP at t = " precision sim-time-h 2 "h (dt = " step-size-dt "s > dt_max)")
     ask patches with [ pcolor != black ] [ set pcolor red - 3 ]
+    auto-save-run
     stop
   ]
 
   sync-from-python
   update-visuals
   tick
+  if sim-time-h >= 48.0 and not final-saved? [ auto-save-run ]
 end
 
 to sync-from-python
@@ -223,6 +256,9 @@ to sync-from-python
     "    J = compute_jacobian(model, y_ode, p_now)"
     "    lmax = float(np.max(np.abs(np.linalg.eigvals(J))))"
     "    dt_lim = float(2.0 / lmax) if lmax > 0 else 999.0"
+    "rec.add(t_h, d_pct, pi_pct, p38_d_pct, inc_pct, polyq_o, misp_o, seq_v, prot_f, prot_s, ros_v, mrfpu_v, p38_pct, lmax, dt_lim)"
+    "if solver_mode == 'Tau-Leap (Ensemble)':"
+    "    rec.add_cells(t_h, inc_arr, pi_d_arr, p38_d_arr)"
   )
 
   set sim-time-s py:runresult "float(t_curr)"
@@ -323,6 +359,25 @@ to update-visuals
     ask ros-particles [ rt random 90 - 45 fd 0.25 ]
     ask proteasomes [ rt random 40 - 20 fd 0.1 ]
   ]
+end
+;; ---------------------------------------------------------------------------
+;; Data export. The work is done in src/tang_polyq/netlogo_export.py; files go to
+;; outputs/NetLogo_Runs/data (CSV + JSON) and outputs/NetLogo_Runs/figures (PNG).
+;; ---------------------------------------------------------------------------
+to save-run-data [ run-status ]
+  py:set "save_status" run-status
+  py:run "save_msg = save_run(rec, save_status) if 'rec' in globals() else 'Nothing to save: press Setup and Go first'"
+  set last-save-msg py:runresult "save_msg"
+  print last-save-msg
+end
+
+to auto-save-run
+  save-run-data (ifelse-value is-unstable? [ "unstable" ] [ "finished" ])
+  set final-saved? true
+end
+
+to save-partial-data
+  save-run-data "partial"
 end
 @#$#@#$#@
 GRAPHICS-WINDOW
@@ -543,9 +598,9 @@ SLIDER
 kaggMisP-slider
 kaggMisP-slider
 0.0
-0.000001
-0.00000005
-0.00000001
+1.0E-9
+1.0E-11
+1.0E-12
 1
 NIL
 HORIZONTAL
@@ -726,9 +781,65 @@ PENS
 "dt_max Ceiling (s)" 1.0 0 -2674135 true "" "if curr-dt-max > 0 [ plotxy sim-time-h curr-dt-max ]"
 "Current Step dt (s)" 1.0 0 -13345367 true "" "plotxy sim-time-h step-size-dt"
 
+BUTTON
+10
+470
+175
+503
+Save Data Now
+save-partial-data
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+SLIDER
+180
+470
+340
+503
+rng-seed
+rng-seed
+0
+1000
+42
+1
+1
+NIL
+HORIZONTAL
+
+MONITOR
+10
+510
+340
+555
+Last Saved Run
+last-save-msg
+0
+1
+11
+
 @#$#@#$#@
 ## WHAT IS IT?
-Interactive Tang et al. (2010) Huntington's PolyQ Model.
+Interactive Tang et al. (2010) Huntington's PolyQ Model (BIOMD0000000285). The model equations come from the Python package tang_polyq (src/tang_polyq); NetLogo only drives and draws them.
+
+## HOW TO USE IT
+1. Start NetLogo from the repository root (the folder that contains data/ and src/).
+2. Pick a scenario and a solver (Euler, RK2, or Tau-Leap ensemble), then press Setup and Go.
+3. With use-custom-sliders? OFF the four parameter sliders only DISPLAY the scenario's own values (loaded at Setup). To explore: press Setup, switch use-custom-sliders? ON, move sliders, press Setup again (the sliders keep your values), then Go.
+4. rng-seed only matters for Tau-Leap. Python results used seed 42 (untreated), 101 (PI at 24 h) and 202 (p38 inhibitor) with tau = 2 s and 300 cells, so the same seed reproduces the Python numbers.
+
+## SAVING DATA
+When a run reaches 48 h (or an explicit solver blows up) the whole run is saved automatically to outputs/NetLogo_Runs: data/<run_id>_timeseries.csv (one row per tick), data/<run_id>_cells.csv (Tau-Leap only), data/<run_id>_meta.json, one extra row in data/netlogo_run_summary.csv, and figures/<run_id>.png. Save Data Now saves a partial run. The 'Last Saved Run' monitor shows what was written. To redraw all figures from saved data: python -m tang_polyq.netlogo_export replot
+
+## THINGS TO KNOW
+- In ODE mode 'Inclusions (%)' is 0 or 100 (the mean-field cell either has an inclusion or not). In Tau-Leap mode it is a real frequency.
+- In Tau-Leap mode 'Seed Time' is when the average live cell first has SeqAggP >= 1; the per-cell median inclusion time is in the saved summary (median_nucleation_h).
 @#$#@#$#@
 default
 true

@@ -1,0 +1,596 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 7.0.4" snapToGrid="false">
+  <code><![CDATA[extensions [ py ]
+
+breed [ cells cell ]
+breed [ oligomers oligomer ]
+breed [ inclusions inclusion ]
+breed [ proteasomes proteasome ]
+breed [ ros-particles ros-particle ]
+
+cells-own [
+  cell-id
+  has-inclusion?
+  is-dead?
+]
+
+globals [
+  sim-time-s
+  sim-time-h
+  is-unstable?
+  status-msg
+  curr-death-pct
+  curr-pi-death-pct
+  curr-p38-death-pct
+  curr-inc-freq-pct
+  curr-seq-agg
+  curr-polyq-olig
+  curr-misp-olig
+  curr-free-prot
+  curr-seq-prot
+  curr-ros
+  curr-p38-pct
+  curr-mrfpu
+  curr-lambda-max
+  curr-dt-max
+  t-seed-h
+  t-exhaust-h
+  final-saved?
+  last-save-msg
+]
+
+to setup
+  clear-all
+  set sim-time-s 0
+  set sim-time-h 0
+  set is-unstable? false
+  set status-msg "Initializing Python Engine..."
+  set t-seed-h -1
+  set t-exhaust-h -1
+  set final-saved? false
+  set last-save-msg "(nothing saved yet)"
+
+  py:setup py:python
+  py:run "import sys, os, numpy as np"
+  py:run "if os.path.abspath('src') not in sys.path: sys.path.insert(0, os.path.abspath('src'))"
+  py:run "from tang_polyq.model import load_default_model"
+  py:run "from tang_polyq.scenarios import get_scenarios"
+  py:run "from tang_polyq.stability import compute_jacobian"
+  py:run "from tang_polyq.netlogo_export import RunRecorder, effective_params, save_run"
+
+  py:set "use_ma_dimer" mass-action-dimer?
+  py:set "scen_key" scenario-mode
+  py:set "dt_val" step-size-dt
+  py:set "n_cells_val" n-ensemble-cells
+  py:set "steps_val" steps-per-tick
+  py:set "seed_val" rng-seed
+  py:set "solver_mode" solver-type
+  py:set "custom_override" use-custom-sliders?
+  py:set "slider_kp38act" kp38act-slider
+  py:set "slider_kproteff" kproteff-24h-slider
+  py:set "slider_kgenROSp38" kgenROSp38-slider
+  py:set "slider_kaggMisP" kaggMisP-slider
+
+  (py:run
+    "xml_file = 'data/BIOMD0000000285_url.xml'"
+    "model = load_default_model(xml_path=xml_file, use_mass_action_dimer=bool(use_ma_dimer))"
+    "scens = get_scenarios()"
+    "scen = scens[scen_key]"
+    "y_ode = scen.get_initial_state(model).copy()"
+    "rng = np.random.default_rng(int(seed_val))"
+    "Y_mc = np.repeat(y_ode[:, None], int(n_cells_val), axis=1).astype(np.float64)"
+    "alive_mask = np.ones(int(n_cells_val), dtype=bool)"
+    "sp_map = model.species_map"
+    "t_curr = 0.0"
+    "p_start = scen.get_params_at(model, 0.0)"
+    "p_after = scen.get_params_at(model, 1.0e12)"
+  )
+
+  ;; Unless custom values are switched on, show the scenario's own parameter values in the sliders,
+  ;; so that turning "use-custom-sliders?" on later changes nothing until a slider is moved.
+  if not use-custom-sliders? [
+    set kp38act-slider py:runresult "float(p_start['kp38act'])"
+    set kproteff-24h-slider py:runresult "float(p_after['kproteff'])"
+    set kgenROSp38-slider py:runresult "float(p_start['kgenROSp38'])"
+    set kaggMisP-slider py:runresult "float(p_start['kaggMisP'])"
+  ]
+  py:set "slider_kp38act" kp38act-slider
+  py:set "slider_kproteff" kproteff-24h-slider
+  py:set "slider_kgenROSp38" kgenROSp38-slider
+  py:set "slider_kaggMisP" kaggMisP-slider
+
+  ;; data recorder for this run (saved by save-run-data)
+  (py:run
+    "sl = dict(kp38act=float(slider_kp38act), kproteff_after_24h=float(slider_kproteff), kgenROSp38=float(slider_kgenROSp38), kaggMisP=float(slider_kaggMisP))"
+    "rec = RunRecorder(scenario=scen_key, solver=solver_mode, dt_s=float(dt_val), steps_per_tick=int(steps_val), n_cells=int(n_cells_val), seed=int(seed_val), mass_action_dimer=bool(use_ma_dimer), custom_sliders=bool(custom_override), params=effective_params(p_start, p_after, bool(custom_override), sl))"
+  )
+
+  setup-visual-world
+  sync-from-python
+  update-visuals
+  set status-msg (word "Ready (" solver-type " | " scenario-mode ")")
+  reset-ticks
+end
+
+to setup-visual-world
+  ifelse solver-type = "Tau-Leap (Ensemble)" [
+    ask patches [ set pcolor black ]
+    let n-c n-ensemble-cells
+    let cols ceiling sqrt n-c
+    let spacing (world-width - 4) / cols
+    let i 0
+    while [ i < n-c ] [
+      let r floor (i / cols)
+      let c (i mod cols)
+      let px (min-pxcor + 2 + c * spacing)
+      let py (max-pycor - 2 - r * spacing)
+      create-cells 1 [
+        set cell-id i
+        setxy px py
+        set shape "circle"
+        set size max list 0.6 (spacing * 0.85)
+        set color sky
+        set has-inclusion? false
+        set is-dead? false
+      ]
+      set i i + 1
+    ]
+  ] [
+    ask patches [
+      let d distancexy 0 0
+      ifelse d < 5 [
+        set pcolor blue - 4
+      ] [
+        ifelse d < 15 [
+          set pcolor sky - 4
+        ] [
+          set pcolor black
+        ]
+      ]
+    ]
+  ]
+end
+
+to go
+  if sim-time-h >= 48.0 or is-unstable? [
+    if not final-saved? [ auto-save-run ]
+    stop
+  ]
+
+  py:set "dt_val" step-size-dt
+  py:set "solver_mode" solver-type
+  py:set "steps_per_tick" steps-per-tick
+  py:set "custom_override" use-custom-sliders?
+  py:set "slider_kp38act" kp38act-slider
+  py:set "slider_kproteff" kproteff-24h-slider
+  py:set "slider_kgenROSp38" kgenROSp38-slider
+  py:set "slider_kaggMisP" kaggMisP-slider
+
+  (py:run
+    "dt_s = float(dt_val)"
+    "n_sub = int(steps_per_tick)"
+    "unstable_flag = False"
+    "for _ in range(n_sub):"
+    "    if t_curr >= 48.0 * 3600.0 - 1e-9: break"
+    "    dt_step = min(dt_s, 48.0 * 3600.0 - t_curr)"
+    "    t_sw = scen.switch_time"
+    "    if t_sw is not None and t_curr < t_sw < t_curr + dt_step:"
+    "        dt_step = t_sw - t_curr"
+    "    p = scen.get_params_at(model, t_curr)"
+    "    if custom_override:"
+    "        p['kp38act'] = float(slider_kp38act)"
+    "        p['kgenROSp38'] = float(slider_kgenROSp38)"
+    "        p['kaggMisP'] = float(slider_kaggMisP)"
+    "        if t_curr >= 24.0 * 3600.0:"
+    "            p['kproteff'] = float(slider_kproteff)"
+    "    if solver_mode == 'Euler (ODE)':"
+    "        dy = model.rhs(t_curr, y_ode, p)"
+    "        y_ode = y_ode + dt_step * dy"
+    "    elif solver_mode == 'RK2 (ODE)':"
+    "        k1 = model.rhs(t_curr, y_ode, p)"
+    "        k2 = model.rhs(t_curr + dt_step, y_ode + dt_step * k1, p)"
+    "        y_ode = y_ode + 0.5 * dt_step * (k1 + k2)"
+    "    elif solver_mode == 'Tau-Leap (Ensemble)':"
+    "        a = model.propensities(t_curr, Y_mc, p)"
+    "        a[:, ~alive_mask] = 0.0"
+    "        lam = np.minimum(a * dt_step, 1e7)"
+    "        k_fires = rng.poisson(lam).astype(np.float64)"
+    "        Y_mc = np.maximum(np.round(Y_mc + (model.stoich_matrix @ k_fires)), 0.0)"
+    "        dead_now = (Y_mc[sp_map['PIdeath'], :] >= 1.0) | (Y_mc[sp_map['p38death'], :] >= 1.0)"
+    "        alive_mask = ~dead_now"
+    "        if np.any(alive_mask):"
+    "            y_ode = np.mean(Y_mc[:, alive_mask], axis=1)"
+    "        else:"
+    "            y_ode = np.mean(Y_mc, axis=1)"
+    "    t_curr += dt_step"
+    "    if solver_mode != 'Tau-Leap (Ensemble)':"
+    "        if (not np.all(np.isfinite(y_ode))) or np.max(np.abs(y_ode)) > 1e12 or np.min(y_ode) < -1.0:"
+    "            unstable_flag = True"
+    "            break"
+  )
+
+  set is-unstable? py:runresult "bool(unstable_flag)"
+  if is-unstable? [
+    set status-msg (word "UNSTABLE BLOWUP at t = " precision sim-time-h 2 "h (dt = " step-size-dt "s > dt_max)")
+    ask patches with [ pcolor != black ] [ set pcolor red - 3 ]
+    auto-save-run
+    stop
+  ]
+
+  sync-from-python
+  update-visuals
+  tick
+  if sim-time-h >= 48.0 and not final-saved? [ auto-save-run ]
+end
+
+to sync-from-python
+  (py:run
+    "t_h = float(t_curr / 3600.0)"
+    "polyq_o = float(sum(y_ode[sp_map[f'AggPolyQ{i}']] for i in range(1, 6)))"
+    "misp_o = float(sum(y_ode[sp_map[f'AggP{i}']] for i in range(1, 6)))"
+    "seq_v = float(y_ode[sp_map['SeqAggP']])"
+    "prot_f = float(y_ode[sp_map['Proteasome']])"
+    "prot_s = float(y_ode[sp_map['AggP_Proteasome']] + y_ode[sp_map['PolyQ_Proteasome']] + y_ode[sp_map['MisP_Proteasome']] + y_ode[sp_map['mRFPu_Proteasome']])"
+    "ros_v = float(y_ode[sp_map['ROS']])"
+    "mrfpu_v = float(y_ode[sp_map['mRFPu']])"
+    "p38_v = float(y_ode[sp_map['p38']])"
+    "p38p_v = float(y_ode[sp_map['p38_P']])"
+    "p38_pct = float(100.0 * p38p_v / max(p38_v + p38p_v, 1e-12))"
+    "if solver_mode == 'Tau-Leap (Ensemble)':"
+    "    pi_d_arr = Y_mc[sp_map['PIdeath'], :] >= 1.0"
+    "    p38_d_arr = Y_mc[sp_map['p38death'], :] >= 1.0"
+    "    dead_arr = pi_d_arr | p38_d_arr"
+    "    inc_arr = Y_mc[sp_map['SeqAggP'], :] >= 1.0"
+    "    d_pct = float(np.mean(dead_arr) * 100.0)"
+    "    pi_pct = float(np.mean(pi_d_arr) * 100.0)"
+    "    p38_d_pct = float(np.mean(p38_d_arr) * 100.0)"
+    "    inc_pct = float(np.mean(inc_arr) * 100.0)"
+    "    lmax = 0.0"
+    "    dt_lim = 0.0"
+    "else:"
+    "    pi_haz = max(float(y_ode[sp_map['PIdeath']]), 0.0)"
+    "    p38_haz = max(float(y_ode[sp_map['p38death']]), 0.0)"
+    "    d_pct = float((1.0 - np.exp(-(pi_haz + p38_haz))) * 100.0)"
+    "    pi_pct = float((1.0 - np.exp(-pi_haz)) * 100.0)"
+    "    p38_d_pct = float((1.0 - np.exp(-p38_haz)) * 100.0)"
+    "    inc_pct = 100.0 if seq_v >= 1.0 else 0.0"
+    "    p_now = scen.get_params_at(model, t_curr)"
+    "    J = compute_jacobian(model, y_ode, p_now)"
+    "    lmax = float(np.max(np.abs(np.linalg.eigvals(J))))"
+    "    dt_lim = float(2.0 / lmax) if lmax > 0 else 999.0"
+    "rec.add(t_h, d_pct, pi_pct, p38_d_pct, inc_pct, polyq_o, misp_o, seq_v, prot_f, prot_s, ros_v, mrfpu_v, p38_pct, lmax, dt_lim)"
+    "if solver_mode == 'Tau-Leap (Ensemble)':"
+    "    rec.add_cells(t_h, inc_arr, pi_d_arr, p38_d_arr)"
+  )
+
+  set sim-time-s py:runresult "float(t_curr)"
+  set sim-time-h py:runresult "t_h"
+  set curr-polyq-olig py:runresult "polyq_o"
+  set curr-misp-olig py:runresult "misp_o"
+  set curr-seq-agg py:runresult "seq_v"
+  set curr-free-prot py:runresult "prot_f"
+  set curr-seq-prot py:runresult "prot_s"
+  set curr-ros py:runresult "ros_v"
+  set curr-mrfpu py:runresult "mrfpu_v"
+  set curr-p38-pct py:runresult "p38_pct"
+  set curr-death-pct py:runresult "d_pct"
+  set curr-pi-death-pct py:runresult "pi_pct"
+  set curr-p38-death-pct py:runresult "p38_d_pct"
+  set curr-inc-freq-pct py:runresult "inc_pct"
+  set curr-lambda-max py:runresult "lmax"
+  set curr-dt-max py:runresult "dt_lim"
+
+  if t-seed-h < 0 and curr-seq-agg >= 1.0 [ set t-seed-h sim-time-h ]
+  if t-exhaust-h < 0 and curr-free-prot < 1.0 [ set t-exhaust-h sim-time-h ]
+end
+
+to update-visuals
+  ifelse solver-type = "Tau-Leap (Ensemble)" [
+    let dead-list py:runresult "dead_arr.tolist()"
+    let inc-list py:runresult "inc_arr.tolist()"
+    let pi-list py:runresult "pi_d_arr.tolist()"
+    ask cells [
+      let d? item cell-id dead-list
+      let inc? item cell-id inc-list
+      let pi? item cell-id pi-list
+      set is-dead? d?
+      set has-inclusion? inc?
+      ifelse d? [
+        set color ifelse-value pi? [ magenta ] [ red ]
+        set shape "x"
+      ] [
+        ifelse inc? [
+          set color orange
+          set shape "target"
+        ] [
+          set color sky
+          set shape "circle"
+        ]
+      ]
+    ]
+  ] [
+    let target-inc min list 80 round (curr-seq-agg / 250)
+    let diff-inc (target-inc - count inclusions)
+    if diff-inc > 0 [
+      create-inclusions diff-inc [
+        set shape "circle"
+        set color orange
+        set size 1.4
+        move-to one-of patches with [ distancexy 0 0 < 8 ]
+      ]
+    ]
+    if diff-inc < 0 [ ask n-of (- diff-inc) inclusions [ die ] ]
+
+    let target-olig min list 100 round ((curr-polyq-olig + curr-misp-olig) / 30)
+    let diff-olig (target-olig - count oligomers)
+    if diff-olig > 0 [
+      create-oligomers diff-olig [
+        set shape "dot"
+        set color yellow
+        set size 0.9
+        move-to one-of patches with [ distancexy 0 0 < 14 and distancexy 0 0 > 4 ]
+      ]
+    ]
+    if diff-olig < 0 [ ask n-of (- diff-olig) oligomers [ die ] ]
+
+    let target-prot min list 60 round (curr-free-prot / 10)
+    let diff-prot (target-prot - count proteasomes)
+    if diff-prot > 0 [
+      create-proteasomes diff-prot [
+        set shape "square"
+        set color green
+        set size 0.8
+        move-to one-of patches with [ distancexy 0 0 < 14 ]
+      ]
+    ]
+    if diff-prot < 0 [ ask n-of (- diff-prot) proteasomes [ die ] ]
+
+    let target-ros min list 120 round (curr-ros / 4)
+    let diff-ros (target-ros - count ros-particles)
+    if diff-ros > 0 [
+      create-ros-particles diff-ros [
+        set shape "star"
+        set color violet
+        set size 0.7
+        move-to one-of patches with [ distancexy 0 0 < 14 ]
+      ]
+    ]
+    if diff-ros < 0 [ ask n-of (- diff-ros) ros-particles [ die ] ]
+
+    ask oligomers [ rt random 60 - 30 fd 0.15 ]
+    ask ros-particles [ rt random 90 - 45 fd 0.25 ]
+    ask proteasomes [ rt random 40 - 20 fd 0.1 ]
+  ]
+end
+;; ---------------------------------------------------------------------------
+;; Data export. The work is done in src/tang_polyq/netlogo_export.py; files go to
+;; outputs/NetLogo_Runs/data (CSV + JSON) and outputs/NetLogo_Runs/figures (PNG).
+;; ---------------------------------------------------------------------------
+to save-run-data [ run-status ]
+  py:set "save_status" run-status
+  py:run "save_msg = save_run(rec, save_status) if 'rec' in globals() else 'Nothing to save: press Setup and Go first'"
+  set last-save-msg py:runresult "save_msg"
+  print last-save-msg
+end
+
+to auto-save-run
+  save-run-data (ifelse-value is-unstable? [ "unstable" ] [ "finished" ])
+  set final-saved? true
+end
+
+to save-partial-data
+  save-run-data "partial"
+end]]></code>
+  <widgets>
+    <view x="355" wrappingAllowedX="true" y="10" frameRate="30.0" minPycor="-16" height="418" showTickCounter="true" patchSize="12.5" fontSize="10" wrappingAllowedY="true" width="418" tickCounterLabel="ticks" maxPycor="16" updateMode="1" maxPxcor="16" minPxcor="-16"></view>
+    <button x="10" y="10" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="85" display="Setup">setup</button>
+    <button x="105" y="10" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="90" display="Go / Pause">go</button>
+    <button x="205" y="10" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="135" display="Step Once">go</button>
+    <chooser x="10" y="60" height="60" variable="scenario-mode" current="0" width="330" display="scenario-mode">
+      <choice type="string" value="untreated"></choice>
+      <choice type="string" value="p38_inhibitor"></choice>
+      <choice type="string" value="pi_24h"></choice>
+      <choice type="string" value="pi_24h_p38_inhibitor"></choice>
+      <choice type="string" value="no_p38_ros_feedback"></choice>
+      <choice type="string" value="pi_24h_no_feedback"></choice>
+      <choice type="string" value="p38_inh_no_feedback"></choice>
+      <choice type="string" value="no_basal_ros_gen"></choice>
+      <choice type="string" value="no_polyq_control"></choice>
+      <choice type="string" value="no_polyq_no_agg"></choice>
+    </chooser>
+    <chooser x="10" y="125" height="60" variable="solver-type" current="0" width="175" display="solver-type">
+      <choice type="string" value="RK2 (ODE)"></choice>
+      <choice type="string" value="Euler (ODE)"></choice>
+      <choice type="string" value="Tau-Leap (Ensemble)"></choice>
+    </chooser>
+    <slider x="190" step="0.5" y="125" max="30.0" width="150" display="step-size-dt" height="50" min="0.5" direction="Horizontal" default="2.0" variable="step-size-dt" units="s"></slider>
+    <slider x="10" step="1" y="190" max="300" width="165" display="steps-per-tick" height="50" min="1" direction="Horizontal" default="60.0" variable="steps-per-tick"></slider>
+    <slider x="180" step="25" y="190" max="300" width="160" display="n-ensemble-cells" height="50" min="25" direction="Horizontal" default="300.0" variable="n-ensemble-cells" units="cells"></slider>
+    <switch x="10" y="247" height="40" on="true" variable="mass-action-dimer?" width="165" display="mass-action-dimer?"></switch>
+    <switch x="180" y="247" height="40" on="false" variable="use-custom-sliders?" width="160" display="use-custom-sliders?"></switch>
+    <slider x="10" step="0.05" y="294" max="1.0" width="165" display="kp38act-slider" height="50" min="0.0" direction="Horizontal" default="1.0" variable="kp38act-slider"></slider>
+    <slider x="180" step="0.05" y="294" max="1.0" width="160" display="kproteff-24h-slider" height="50" min="0.0" direction="Horizontal" default="1.0" variable="kproteff-24h-slider"></slider>
+    <slider x="10" step="0.0001" y="349" max="0.002" width="165" display="kgenROSp38-slider" height="50" min="0.0" direction="Horizontal" default="7.0E-4" variable="kgenROSp38-slider"></slider>
+    <slider x="180" step="1.0E-12" y="349" max="1.0E-9" width="160" display="kaggMisP-slider" height="50" min="0.0" direction="Horizontal" default="1.0E-11" variable="kaggMisP-slider"></slider>
+    <monitor x="10" precision="17" y="408" height="60" fontSize="11" width="105" display="Time (hours)">precision sim-time-h 2</monitor>
+    <monitor x="120" precision="17" y="408" height="60" fontSize="11" width="105" display="Total Death (%)">precision curr-death-pct 2</monitor>
+    <monitor x="230" precision="17" y="408" height="60" fontSize="11" width="110" display="Inclusions (%)">precision curr-inc-freq-pct 1</monitor>
+    <monitor x="10" precision="17" y="473" height="60" fontSize="11" width="105" display="Seed Time (h)"><![CDATA[ifelse-value (t-seed-h >= 0) [ precision t-seed-h 2 ] [ "None" ]]]></monitor>
+    <monitor x="120" precision="17" y="473" height="60" fontSize="11" width="105" display="Prot Exhaust (h)"><![CDATA[ifelse-value (t-exhaust-h >= 0) [ precision t-exhaust-h 2 ] [ "None" ]]]></monitor>
+    <monitor x="230" precision="17" y="473" height="60" fontSize="11" width="110" display="dt_max Limit (s)"><![CDATA[ifelse-value (curr-dt-max > 0) [ precision curr-dt-max 2 ] [ "N/A (MC)" ]]]></monitor>
+    <monitor x="10" precision="17" y="538" height="60" fontSize="11" width="330" display="Solver Status">status-msg</monitor>
+    <plot x="785" autoPlotX="true" yMax="2500.0" autoPlotY="true" yAxis="Copies" y="10" xMin="0.0" height="254" legend="true" xMax="48.0" yMin="0.0" width="375" xAxis="Time (h)" display="1. Oligomers &amp; Inclusion Growth (Fig 1A)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="PolyQ Oligomers" color="-955883" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-polyq-olig</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="MisP Oligomers" color="-2674135" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-misp-olig</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="SeqAggP (x0.1)" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h (curr-seq-agg * 0.1)</update>
+      </pen>
+    </plot>
+    <plot x="1170" autoPlotX="true" yMax="1500.0" autoPlotY="true" yAxis="Copies" y="10" xMin="0.0" height="254" legend="true" xMax="48.0" yMin="0.0" width="375" xAxis="Time (h)" display="2. Proteasome Depletion &amp; mRFPu (Fig 1B &amp; Fig 5A)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="Free Proteasome" color="-10899396" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-free-prot</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="Bound Proteasome" color="-2674135" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-seq-prot</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="mRFPu Reporter" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-mrfpu</update>
+      </pen>
+    </plot>
+    <plot x="785" autoPlotX="true" yMax="400.0" autoPlotY="true" yAxis="Value" y="274" xMin="0.0" height="227" legend="true" xMax="48.0" yMin="0.0" width="375" xAxis="Time (h)" display="3. ROS &amp; p38 MAPK Feedback Loop (Fig 1C &amp; Fig 5B)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="ROS Copies" color="-8630108" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-ros</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="Active p38_P (%)" color="-7500403" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-p38-pct</update>
+      </pen>
+    </plot>
+    <plot x="1170" autoPlotX="true" yMax="100.0" autoPlotY="true" yAxis="Percent (%)" y="274" xMin="0.0" height="254" legend="true" xMax="48.0" yMin="0.0" width="375" xAxis="Time (h)" display="4. Cumulative Cell Death &amp; Inclusion Freq (Fig 2, 3, 6)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="Total Death (%)" color="-16777216" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-death-pct</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="PI Route (%)" color="-2064490" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-pi-death-pct</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="p38 Route (%)" color="-11221820" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-p38-death-pct</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="Inclusion Freq (%)" color="-955883" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h curr-inc-freq-pct</update>
+      </pen>
+    </plot>
+    <plot x="355" autoPlotX="true" yMax="25.0" autoPlotY="true" yAxis="Seconds (s)" y="440" xMin="0.0" height="192" legend="true" xMax="48.0" yMin="0.0" width="420" xAxis="Time (h)" display="5. Explicit Stability Ceiling dt_max = 2/|lambda_max| (Fig 4B)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="dt_max Ceiling (s)" color="-2674135" legend="true">
+        <setup></setup>
+        <update><![CDATA[if curr-dt-max > 0 [ plotxy sim-time-h curr-dt-max ]]]></update>
+      </pen>
+      <pen interval="1.0" mode="0" display="Current Step dt (s)" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plotxy sim-time-h step-size-dt</update>
+      </pen>
+    </plot>
+    <button x="10" y="608" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="165" display="Save Data Now">save-partial-data</button>
+    <slider x="180" step="1" y="608" max="1000" width="160" display="rng-seed" height="50" min="0" direction="Horizontal" default="42.0" variable="rng-seed"></slider>
+    <monitor x="10" precision="0" y="665" height="60" fontSize="11" width="330" display="Last Saved Run">last-save-msg</monitor>
+  </widgets>
+  <info><![CDATA[## WHAT IS IT?
+Interactive Tang et al. (2010) Huntington's PolyQ Model (BIOMD0000000285). The model equations come from the Python package tang_polyq (src/tang_polyq); NetLogo only drives and draws them.
+
+## HOW TO USE IT
+1. Start NetLogo from the repository root (the folder that contains data/ and src/).
+2. Pick a scenario and a solver (Euler, RK2, or Tau-Leap ensemble), then press Setup and Go.
+3. With use-custom-sliders? OFF the four parameter sliders only DISPLAY the scenario's own values (loaded at Setup). To explore: press Setup, switch use-custom-sliders? ON, move sliders, press Setup again (the sliders keep your values), then Go.
+4. rng-seed only matters for Tau-Leap. Python results used seed 42 (untreated), 101 (PI at 24 h) and 202 (p38 inhibitor) with tau = 2 s and 300 cells, so the same seed reproduces the Python numbers.
+
+## SAVING DATA
+When a run reaches 48 h (or an explicit solver blows up) the whole run is saved automatically to outputs/NetLogo_Runs: data/<run_id>_timeseries.csv (one row per tick), data/<run_id>_cells.csv (Tau-Leap only), data/<run_id>_meta.json, one extra row in data/netlogo_run_summary.csv, and figures/<run_id>.png. Save Data Now saves a partial run. The 'Last Saved Run' monitor shows what was written. To redraw all figures from saved data: python -m tang_polyq.netlogo_export replot
+
+## THINGS TO KNOW
+- In ODE mode 'Inclusions (%)' is 0 or 100 (the mean-field cell either has an inclusion or not). In Tau-Leap mode it is a real frequency.
+- In Tau-Leap mode 'Seed Time' is when the average live cell first has SeqAggP >= 1; the per-cell median inclusion time is in the saved summary (median_nucleation_h).]]></info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="185" y="105"></point>
+        <point x="300" y="105"></point>
+        <point x="210" y="175"></point>
+        <point x="240" y="285"></point>
+        <point x="150" y="215"></point>
+        <point x="60" y="285"></point>
+        <point x="90" y="175"></point>
+        <point x="0" y="105"></point>
+        <point x="115" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="true" color="255" diameter="240" filled="false"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="true" color="255" diameter="120" filled="false"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+</model>
